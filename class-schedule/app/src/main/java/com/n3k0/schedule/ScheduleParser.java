@@ -164,8 +164,25 @@ public final class ScheduleParser {
         }
     }
 
+    private static final class HorizontalSegment {
+        final float y;
+        final float left;
+        final float right;
+
+        HorizontalSegment(float y, float left, float right) {
+            this.y = y;
+            this.left = Math.min(left, right);
+            this.right = Math.max(left, right);
+        }
+
+        boolean crossesX(float x) {
+            return x >= left - 0.8f && x <= right + 0.8f;
+        }
+    }
+
     private static final class GridExtractor extends PDFGraphicsStreamEngine {
         final List<VerticalSegment> verticals = new ArrayList<>();
+        final List<HorizontalSegment> horizontals = new ArrayList<>();
         private final float pageHeight;
         private PointF current = new PointF();
 
@@ -175,10 +192,28 @@ public final class ScheduleParser {
         }
 
         private void record(float x1, float y1, float x2, float y2) {
-            if (Math.abs(x1 - x2) > 1.0f || Math.abs(y1 - y2) < 3.0f) return;
-            float top1 = pageHeight - y1;
-            float top2 = pageHeight - y2;
-            verticals.add(new VerticalSegment((x1 + x2) * 0.5f, top1, top2));
+            float dx = Math.abs(x1 - x2);
+            float dy = Math.abs(y1 - y2);
+
+            if (dx <= 1.0f && dy >= 3.0f) {
+                float top1 = pageHeight - y1;
+                float top2 = pageHeight - y2;
+                verticals.add(new VerticalSegment(
+                        (x1 + x2) * 0.5f,
+                        top1,
+                        top2
+                ));
+                return;
+            }
+
+            if (dy <= 1.0f && dx >= 3.0f) {
+                float top = pageHeight - ((y1 + y2) * 0.5f);
+                horizontals.add(new HorizontalSegment(
+                        top,
+                        x1,
+                        x2
+                ));
+            }
         }
 
         @Override
@@ -225,22 +260,52 @@ public final class ScheduleParser {
         final float height;
         final List<WordBox> words;
         final List<VerticalSegment> verticals;
-        List<Anchor> anchors = new ArrayList<>();
+        final List<HorizontalSegment> horizontals;
+        List<PairRow> rows = new ArrayList<>();
 
-        PageData(int pageIndex, float width, float height, List<WordBox> words,
-                 List<VerticalSegment> verticals) {
+        PageData(
+                int pageIndex,
+                float width,
+                float height,
+                List<WordBox> words,
+                List<VerticalSegment> verticals,
+                List<HorizontalSegment> horizontals
+        ) {
             this.pageIndex = pageIndex;
             this.width = width;
             this.height = height;
             this.words = words;
             this.verticals = verticals;
+            this.horizontals = horizontals;
         }
     }
 
-    private static final class Anchor {
+    /**
+     * One real table row for a numbered pair. top/bottom are taken from
+     * horizontal grid lines crossing the pair-number column, not guessed from
+     * the midpoint between text anchors. This is the key invariant preventing
+     * content from the next day leaking into the previous pair.
+     */
+    private static final class PairRow {
         final int pair;
-        final float y;
-        Anchor(int pair, float y) { this.pair = pair; this.y = y; }
+        final float anchorY;
+        final float top;
+        final float bottom;
+        final boolean gridBounded;
+
+        PairRow(
+                int pair,
+                float anchorY,
+                float top,
+                float bottom,
+                boolean gridBounded
+        ) {
+            this.pair = pair;
+            this.anchorY = anchorY;
+            this.top = top;
+            this.bottom = bottom;
+            this.gridBounded = gridBounded;
+        }
     }
 
     private static final class GroupInfo {
@@ -374,8 +439,12 @@ public final class ScheduleParser {
                 GridExtractor gridExtractor = new GridExtractor(pdPage);
                 gridExtractor.processPage(pdPage);
                 pages.add(new PageData(
-                        i, width, height, new ArrayList<>(stripper.words),
-                        new ArrayList<>(gridExtractor.verticals)
+                        i,
+                        width,
+                        height,
+                        new ArrayList<>(stripper.words),
+                        new ArrayList<>(gridExtractor.verticals),
+                        new ArrayList<>(gridExtractor.horizontals)
                 ));
             }
 
@@ -391,8 +460,16 @@ public final class ScheduleParser {
             diagnostics.add("Найденные группы: " + String.join(", ", headerGroupNames));
 
             for (PageData page : pages) {
-                page.anchors = detectAnchors(page, header);
-                diagnostics.add("Страница " + (page.pageIndex + 1) + ": строк пар = " + page.anchors.size());
+                page.rows = detectPairRows(page, header);
+                int exactRows = 0;
+                for (PairRow row : page.rows) {
+                    if (row.gridBounded) exactRows++;
+                }
+                diagnostics.add(
+                        "Страница " + (page.pageIndex + 1) +
+                                ": строк пар = " + page.rows.size() +
+                                ", по сетке = " + exactRows
+                );
             }
 
             Map<RowKey, List<WordBox>> rows = collectRows(pages, header, warnings);
@@ -447,12 +524,27 @@ public final class ScheduleParser {
         final List<Float> roomCenters;
         final float medianSpacing;
         final float groupAreaLeft;
+        final float pairColumnLeft;
+        final float pairColumnRight;
 
-        Header(List<GroupInfo> groups, List<Float> roomCenters, float medianSpacing, float groupAreaLeft) {
+        Header(
+                List<GroupInfo> groups,
+                List<Float> roomCenters,
+                float medianSpacing,
+                float groupAreaLeft,
+                float pairColumnLeft,
+                float pairColumnRight
+        ) {
             this.groups = groups;
             this.roomCenters = roomCenters;
             this.medianSpacing = medianSpacing;
             this.groupAreaLeft = groupAreaLeft;
+            this.pairColumnLeft = pairColumnLeft;
+            this.pairColumnRight = pairColumnRight;
+        }
+
+        float pairColumnCenter() {
+            return (pairColumnLeft + pairColumnRight) * 0.5f;
         }
     }
 
@@ -567,7 +659,39 @@ public final class ScheduleParser {
             }
             roomCenters.add(best != null ? best : gc + medianSpacing * 0.50f);
         }
-        return new Header(groups, roomCenters, medianSpacing, groupAreaLeft);
+        float roughPairMin = groupAreaLeft * 0.30f;
+        float roughPairMax = groupAreaLeft * 0.50f;
+        List<Float> pairCenters = new ArrayList<>();
+
+        for (WordBox word : page.words) {
+            if (!word.text.matches("[1-5]")) continue;
+            float center = word.centerX();
+            if (center >= roughPairMin && center <= roughPairMax) {
+                pairCenters.add(center);
+            }
+        }
+
+        float pairCenter = pairCenters.isEmpty()
+                ? (roughPairMin + roughPairMax) * 0.5f
+                : median(pairCenters);
+
+        float pairLeft = nearestVerticalLeft(page.verticals, pairCenter);
+        float pairRight = nearestVerticalRight(page.verticals, pairCenter);
+
+        if (Float.isNaN(pairLeft) || Float.isNaN(pairRight) ||
+                pairRight - pairLeft < 4f) {
+            pairLeft = roughPairMin;
+            pairRight = roughPairMax;
+        }
+
+        return new Header(
+                groups,
+                roomCenters,
+                medianSpacing,
+                groupAreaLeft,
+                pairLeft,
+                pairRight
+        );
     }
 
     private String normalizeGroupCandidate(String raw) {
@@ -592,114 +716,356 @@ public final class ScheduleParser {
                 || GROUP_PATTERN.matcher(value).matches();
     }
 
-    private List<Anchor> detectAnchors(PageData page, Header header) {
-        List<Anchor> anchors = new ArrayList<>();
+    private List<PairRow> detectPairRows(
+            PageData page,
+            Header header
+    ) {
+        List<PairRow> candidates = new ArrayList<>();
+        float pairCenter = header.pairColumnCenter();
+        List<Float> horizontalBounds =
+                horizontalBoundariesAtX(page, pairCenter);
 
-        // The old implementation used 5.5%..9% of the page width. On this
-        // timetable that range overlaps BOTH the "Занятие №" column and the
-        // neighbouring "Урок №" column, so lesson numbers 1..5 were sometimes
-        // mistaken for pair numbers. That corrupts row boundaries and can shift
-        // whole days.
-        //
-        // Derive the pair-number column from the left edge of the actual group
-        // table instead. In this layout the technical columns are:
-        // [day][pair][lesson][time] | [groups...].
-        float xMin = header.groupAreaLeft * 0.30f;
-        float xMax = header.groupAreaLeft * 0.50f;
+        for (WordBox word : page.words) {
+            float center = word.centerX();
 
-        for (WordBox w : page.words) {
-            float x = w.centerX();
-            if (x < xMin || x > xMax) continue;
-            if (!w.text.matches("[1-5]")) continue;
-            anchors.add(new Anchor(Integer.parseInt(w.text), w.y));
+            if (center < header.pairColumnLeft - 1.5f ||
+                    center > header.pairColumnRight + 1.5f) {
+                continue;
+            }
+
+            if (!word.text.matches("[1-5]")) continue;
+
+            float top = Float.NaN;
+            float bottom = Float.NaN;
+
+            for (float boundary : horizontalBounds) {
+                if (boundary <= word.y + 0.8f) {
+                    top = boundary;
+                } else {
+                    bottom = boundary;
+                    break;
+                }
+            }
+
+            boolean exact =
+                    !Float.isNaN(top) &&
+                            !Float.isNaN(bottom) &&
+                            bottom - top >= 6f;
+
+            candidates.add(
+                    new PairRow(
+                            Integer.parseInt(word.text),
+                            word.y,
+                            top,
+                            bottom,
+                            exact
+                    )
+            );
         }
 
-        anchors.sort(Comparator.comparingDouble(a -> a.y));
+        candidates.sort(
+                Comparator.comparingDouble(row -> row.anchorY)
+        );
 
-        // Collapse accidental duplicate text runs at the same visual row.
-        List<Anchor> clean = new ArrayList<>();
-        for (Anchor a : anchors) {
+        List<PairRow> clean = new ArrayList<>();
+
+        for (PairRow candidate : candidates) {
             boolean duplicate = false;
-            for (Anchor old : clean) {
-                if (old.pair == a.pair && Math.abs(old.y - a.y) < 2.0f) {
+
+            for (PairRow old : clean) {
+                boolean sameBand =
+                        candidate.gridBounded &&
+                                old.gridBounded &&
+                                Math.abs(candidate.top - old.top) < 1.5f &&
+                                Math.abs(candidate.bottom - old.bottom) < 1.5f;
+
+                boolean sameAnchor =
+                        old.pair == candidate.pair &&
+                                Math.abs(old.anchorY - candidate.anchorY) < 2.0f;
+
+                if (sameBand || sameAnchor) {
                     duplicate = true;
                     break;
                 }
             }
-            if (!duplicate) clean.add(a);
+
+            if (!duplicate) clean.add(candidate);
         }
-        return clean;
+
+        // Grid extraction is the primary path. If one row in an unusual PDF
+        // has no usable horizontal borders, bound only that row by neighbouring
+        // anchors. This fallback can no longer affect rows that have real lines.
+        List<PairRow> resolved = new ArrayList<>();
+
+        for (int i = 0; i < clean.size(); i++) {
+            PairRow row = clean.get(i);
+
+            if (row.gridBounded) {
+                resolved.add(row);
+                continue;
+            }
+
+            float y = row.anchorY;
+            float top;
+            float bottom;
+
+            if (i > 0) {
+                top = (clean.get(i - 1).anchorY + y) * 0.5f;
+            } else if (clean.size() > 1) {
+                top = y - (clean.get(1).anchorY - y) * 0.5f;
+            } else {
+                top = y - 20f;
+            }
+
+            if (i < clean.size() - 1) {
+                bottom = (y + clean.get(i + 1).anchorY) * 0.5f;
+            } else if (i > 0) {
+                bottom = y + (y - clean.get(i - 1).anchorY) * 0.5f;
+            } else {
+                bottom = y + 20f;
+            }
+
+            resolved.add(
+                    new PairRow(
+                            row.pair,
+                            row.anchorY,
+                            top,
+                            bottom,
+                            false
+                    )
+            );
+        }
+
+        return resolved;
     }
 
-    private Map<RowKey, List<WordBox>> collectRows(List<PageData> pages, Header header, List<String> warnings) {
-        Map<RowKey, List<WordBox>> rows = new LinkedHashMap<>();
+    private List<Float> horizontalBoundariesAtX(
+            PageData page,
+            float x
+    ) {
+        List<Float> values = new ArrayList<>();
+
+        for (HorizontalSegment segment : page.horizontals) {
+            if (!segment.crossesX(x)) continue;
+            if (segment.right - segment.left < 6f) continue;
+            values.add(segment.y);
+        }
+
+        Collections.sort(values);
+
+        List<Float> clustered = new ArrayList<>();
+        List<Integer> counts = new ArrayList<>();
+
+        for (float value : values) {
+            if (clustered.isEmpty() ||
+                    value - clustered.get(clustered.size() - 1) > 1.4f) {
+                clustered.add(value);
+                counts.add(1);
+            } else {
+                int last = clustered.size() - 1;
+                int count = counts.get(last);
+                clustered.set(
+                        last,
+                        (clustered.get(last) * count + value) / (count + 1)
+                );
+                counts.set(last, count + 1);
+            }
+        }
+
+        return clustered;
+    }
+
+    private float nearestVerticalLeft(
+            List<VerticalSegment> segments,
+            float x
+    ) {
+        float best = Float.NaN;
+        float bestDistance = Float.MAX_VALUE;
+
+        for (VerticalSegment segment : segments) {
+            if (segment.bottom - segment.top < 8f) continue;
+            if (segment.x >= x) continue;
+
+            float distance = x - segment.x;
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                best = segment.x;
+            }
+        }
+
+        return best;
+    }
+
+    private float nearestVerticalRight(
+            List<VerticalSegment> segments,
+            float x
+    ) {
+        float best = Float.NaN;
+        float bestDistance = Float.MAX_VALUE;
+
+        for (VerticalSegment segment : segments) {
+            if (segment.bottom - segment.top < 8f) continue;
+            if (segment.x <= x) continue;
+
+            float distance = segment.x - x;
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                best = segment.x;
+            }
+        }
+
+        return best;
+    }
+
+    private Map<RowKey, List<WordBox>> collectRows(
+            List<PageData> pages,
+            Header header,
+            List<String> warnings
+    ) {
+        Map<RowKey, List<WordBox>> rows =
+                new LinkedHashMap<>();
+
         LocalDate carryDate = null;
+        int carryPair = -1;
 
         for (PageData page : pages) {
-            if (page.anchors.isEmpty()) continue;
+            if (page.rows.isEmpty()) continue;
+
             LocalDate carryBeforePage = carryDate;
-            List<LocalDate> explicitDates = extractDates(page.words);
-            List<List<Integer>> dayGroups = groupAnchorIndexes(page.anchors);
-            Map<Integer, LocalDate> anchorDates = new HashMap<>();
+            int carryPairBeforePage = carryPair;
+
+            List<LocalDate> explicitDates =
+                    extractDates(page.words);
+
+            List<List<Integer>> dayGroups =
+                    groupPairRowIndexes(page.rows);
+
+            Map<Integer, LocalDate> rowDates =
+                    new HashMap<>();
+
             int dateIndex = 0;
 
-            for (int dayIndex = 0; dayIndex < dayGroups.size(); dayIndex++) {
-                List<Integer> indexes = dayGroups.get(dayIndex);
-                int firstPair = page.anchors.get(indexes.get(0)).pair;
+            for (int dayIndex = 0;
+                 dayIndex < dayGroups.size();
+                 dayIndex++) {
+                List<Integer> indexes =
+                        dayGroups.get(dayIndex);
+
+                int firstPair =
+                        page.rows.get(
+                                indexes.get(0)
+                        ).pair;
+
                 LocalDate assigned;
-                if (dayIndex == 0 && firstPair != 1 && carryDate != null) {
+
+                if (dayIndex == 0 &&
+                        firstPair != 1 &&
+                        carryDate != null) {
                     assigned = carryDate;
-                } else if (dateIndex < explicitDates.size()) {
-                    assigned = explicitDates.get(dateIndex++);
+                } else if (dateIndex <
+                        explicitDates.size()) {
+                    assigned =
+                            explicitDates.get(dateIndex++);
                 } else if (carryDate != null) {
-                    assigned = carryDate.plusDays(1);
-                    warnings.add("Стр. " + (page.pageIndex + 1) + ": дата восстановлена как " + SHORT_DATE.format(assigned));
+                    assigned =
+                            carryDate.plusDays(1);
+
+                    warnings.add(
+                            "Стр. " +
+                                    (page.pageIndex + 1) +
+                                    ": дата восстановлена как " +
+                                    SHORT_DATE.format(assigned)
+                    );
                 } else {
                     continue;
                 }
-                for (int idx : indexes) anchorDates.put(idx, assigned);
+
+                for (int index : indexes) {
+                    rowDates.put(index, assigned);
+                }
+
                 carryDate = assigned;
             }
 
-            List<Float> ys = new ArrayList<>();
-            for (Anchor a : page.anchors) ys.add(a.y);
-            List<float[]> bounds = new ArrayList<>();
-            for (int i = 0; i < ys.size(); i++) {
-                float y = ys.get(i);
-                float top;
-                float bottom;
-                if (i > 0) top = (ys.get(i - 1) + y) * 0.5f;
-                else if (ys.size() > 1) top = y - (ys.get(1) - y) * 0.5f;
-                else top = y - 20f;
-                if (i < ys.size() - 1) bottom = (y + ys.get(i + 1)) * 0.5f;
-                else if (i > 0) bottom = y + (y - ys.get(i - 1)) * 0.5f;
-                else bottom = y + 20f;
-                bounds.add(new float[]{top, bottom});
-            }
+            for (int i = 0;
+                 i < page.rows.size();
+                 i++) {
+                PairRow row = page.rows.get(i);
+                LocalDate date = rowDates.get(i);
 
-            for (int i = 0; i < page.anchors.size(); i++) {
-                LocalDate date = anchorDates.get(i);
                 if (date == null) continue;
-                RowKey key = new RowKey(date, page.anchors.get(i).pair);
-                List<WordBox> dest = rows.computeIfAbsent(key, k -> new ArrayList<>());
-                float top = bounds.get(i)[0];
-                float bottom = bounds.get(i)[1];
-                for (WordBox w : page.words) {
-                    if (w.x0 < header.groupAreaLeft) continue;
-                    if (w.y >= top && w.y < bottom) dest.add(w.globalY());
+
+                RowKey key =
+                        new RowKey(date, row.pair);
+
+                List<WordBox> destination =
+                        rows.computeIfAbsent(
+                                key,
+                                ignored -> new ArrayList<>()
+                        );
+
+                // Exact grid boundaries are intentionally inclusive only on
+                // the top edge and exclusive on the bottom edge. A subject
+                // beginning in the next day's first pair therefore cannot
+                // leak upward into pair 5 of the previous day.
+                for (WordBox word : page.words) {
+                    if (word.x0 <
+                            header.groupAreaLeft - 1.0f) {
+                        continue;
+                    }
+
+                    if (word.y >= row.top - 0.4f &&
+                            word.y < row.bottom - 0.4f) {
+                        destination.add(word.globalY());
+                    }
                 }
+
+                carryDate = date;
+                carryPair = row.pair;
             }
 
-            int firstPair = page.anchors.get(0).pair;
-            float firstTop = bounds.get(0)[0];
-            if (carryBeforePage != null && firstPair > 1) {
-                RowKey previous = new RowKey(carryBeforePage, firstPair - 1);
-                List<WordBox> dest = rows.computeIfAbsent(previous, k -> new ArrayList<>());
-                for (WordBox w : page.words) {
-                    if (w.x0 >= header.groupAreaLeft && w.y < firstTop - 0.5f) dest.add(w.globalY());
+            // A PDF page may start in the middle of a pair. In that case there
+            // is text above the first complete pair-row rectangle, but no pair
+            // number on this page. Append that fragment to the exact row that
+            // ended the previous page. Never infer "firstPair - 1": the stored
+            // previous row is authoritative and also works for a split pair 5.
+            if (carryBeforePage != null &&
+                    carryPairBeforePage >= 1) {
+                PairRow first = page.rows.get(0);
+                List<WordBox> continuation =
+                        new ArrayList<>();
+
+                for (WordBox word : page.words) {
+                    if (word.x0 <
+                            header.groupAreaLeft - 1.0f) {
+                        continue;
+                    }
+
+                    if (word.y <
+                            first.top - 0.4f) {
+                        continuation.add(
+                                word.globalY()
+                        );
+                    }
+                }
+
+                if (!continuation.isEmpty()) {
+                    RowKey previous =
+                            new RowKey(
+                                    carryBeforePage,
+                                    carryPairBeforePage
+                            );
+
+                    rows.computeIfAbsent(
+                                    previous,
+                                    ignored ->
+                                            new ArrayList<>()
+                            )
+                            .addAll(continuation);
                 }
             }
         }
+
         return rows;
     }
 
@@ -743,24 +1109,424 @@ public final class ScheduleParser {
         return null;
     }
 
-    private List<List<Integer>> groupAnchorIndexes(List<Anchor> anchors) {
-        List<List<Integer>> out = new ArrayList<>();
-        List<Integer> current = new ArrayList<>();
-        Integer previous = null;
-        for (int i = 0; i < anchors.size(); i++) {
-            int pair = anchors.get(i).pair;
-            if (previous != null && pair <= previous) {
-                out.add(current);
+    private List<List<Integer>> groupPairRowIndexes(
+            List<PairRow> rows
+    ) {
+        List<List<Integer>> result =
+                new ArrayList<>();
+
+        List<Integer> current =
+                new ArrayList<>();
+
+        Integer previousPair = null;
+
+        for (int i = 0; i < rows.size(); i++) {
+            int pair = rows.get(i).pair;
+
+            if (previousPair != null &&
+                    pair <= previousPair) {
+                if (!current.isEmpty()) {
+                    result.add(current);
+                }
                 current = new ArrayList<>();
             }
+
             current.add(i);
-            previous = pair;
+            previousPair = pair;
         }
-        if (!current.isEmpty()) out.add(current);
-        return out;
+
+        if (!current.isEmpty()) {
+            result.add(current);
+        }
+
+        return result;
     }
 
-    private List<EventDraft> parseRow(List<WordBox> rowWords, Header header, List<PageData> pages) {
+    private List<EventDraft> parseRow(
+            List<WordBox> rowWords,
+            Header header,
+            List<PageData> pages
+    ) {
+        List<EventDraft> exact =
+                parseRowFromGrid(rowWords, header, pages);
+
+        if (!exact.isEmpty()) {
+            return exact;
+        }
+
+        // Compatibility fallback for foreign PDFs that contain positioned text
+        // but omit the table drawing commands. The supplied college timetable
+        // uses the exact-grid path above.
+        return parseRowHeuristic(
+                rowWords,
+                header,
+                pages
+        );
+    }
+
+    /**
+     * Parses a pair strictly as table cells. Words are never associated by
+     * "nearest subject" distance: every text line is first placed into the
+     * vertical interval that physically contains it. Missing internal borders
+     * naturally represent merged lectures spanning several group columns.
+     */
+    private List<EventDraft> parseRowFromGrid(
+            List<WordBox> rowWords,
+            Header header,
+            List<PageData> pages
+    ) {
+        if (rowWords.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        float roomTolerance =
+                header.medianSpacing * 0.20f;
+
+        Map<Integer, List<WordBox>> roomWords =
+                new HashMap<>();
+
+        List<WordBox> content =
+                new ArrayList<>();
+
+        for (WordBox word : rowWords) {
+            int nearestRoom =
+                    nearestIndex(
+                            header.roomCenters,
+                            word.centerX()
+                    );
+
+            boolean roomToken =
+                    nearestRoom >= 0 &&
+                            ROOM_TOKEN
+                                    .matcher(
+                                            word.text.trim()
+                                    )
+                                    .matches() &&
+                            Math.abs(
+                                    header.roomCenters
+                                            .get(nearestRoom) -
+                                            word.centerX()
+                            ) < roomTolerance;
+
+            if (roomToken) {
+                roomWords
+                        .computeIfAbsent(
+                                nearestRoom,
+                                ignored ->
+                                        new ArrayList<>()
+                        )
+                        .add(word);
+            } else {
+                content.add(word);
+            }
+        }
+
+        content.sort(
+                Comparator
+                        .comparingDouble(
+                                (WordBox word) ->
+                                        word.y
+                        )
+                        .thenComparingDouble(
+                                word -> word.x0
+                        )
+        );
+
+        List<LineCluster> lines =
+                new ArrayList<>();
+
+        for (WordBox word : content) {
+            LineCluster line = null;
+
+            for (LineCluster candidate : lines) {
+                if (Math.abs(
+                        candidate.y -
+                                word.y
+                ) < 3.0f) {
+                    line = candidate;
+                    break;
+                }
+            }
+
+            if (line == null) {
+                line =
+                        new LineCluster(word.y);
+                lines.add(line);
+            }
+
+            line.words.add(word);
+
+            float sum = 0f;
+            for (WordBox item : line.words) {
+                sum += item.y;
+            }
+            line.y =
+                    sum / line.words.size();
+        }
+
+        lines.sort(
+                Comparator.comparingDouble(
+                        line -> line.y
+                )
+        );
+
+        Map<String, Block> blocks =
+                new LinkedHashMap<>();
+        Map<String, CellRange> ranges =
+                new LinkedHashMap<>();
+
+        for (LineCluster line : lines) {
+            line.words.sort(
+                    Comparator.comparingDouble(
+                            word -> word.x0
+                    )
+            );
+
+            Map<String, List<WordBox>> wordsByCell =
+                    new LinkedHashMap<>();
+            Map<String, CellRange> lineRanges =
+                    new LinkedHashMap<>();
+
+            for (WordBox word : line.words) {
+                CellRange range =
+                        cellForPosition(
+                                word.page,
+                                word.y,
+                                word.centerX(),
+                                header,
+                                pages
+                        );
+
+                if (range == null) continue;
+
+                String key =
+                        range.startGroup +
+                                ":" +
+                                range.endGroup;
+
+                wordsByCell
+                        .computeIfAbsent(
+                                key,
+                                ignored ->
+                                        new ArrayList<>()
+                        )
+                        .add(word);
+
+                lineRanges.put(key, range);
+            }
+
+            for (Map.Entry<String, List<WordBox>> entry :
+                    wordsByCell.entrySet()) {
+                List<WordBox> words =
+                        entry.getValue();
+
+                words.sort(
+                        Comparator.comparingDouble(
+                                word -> word.x0
+                        )
+                );
+
+                StringBuilder text =
+                        new StringBuilder();
+
+                for (WordBox word : words) {
+                    if (text.length() > 0) {
+                        text.append(' ');
+                    }
+                    text.append(word.text);
+                }
+
+                String clean =
+                        text.toString()
+                                .replaceAll(
+                                        "\\s+",
+                                        " "
+                                )
+                                .trim();
+
+                if (clean.isEmpty()) continue;
+
+                CellRange range =
+                        lineRanges.get(
+                                entry.getKey()
+                        );
+
+                Block block =
+                        blocks.get(
+                                entry.getKey()
+                        );
+
+                if (block == null) {
+                    block =
+                            new Block(
+                                    range.center()
+                            );
+                    blocks.put(
+                            entry.getKey(),
+                            block
+                    );
+                    ranges.put(
+                            entry.getKey(),
+                            range
+                    );
+                }
+
+                block.add(
+                        range.center(),
+                        line.y,
+                        clean
+                );
+            }
+        }
+
+        if (blocks.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        Map<Integer, String> rooms =
+                new HashMap<>();
+
+        for (Map.Entry<Integer, List<WordBox>> entry :
+                roomWords.entrySet()) {
+            List<WordBox> words =
+                    entry.getValue();
+
+            words.sort(
+                    Comparator
+                            .comparingDouble(
+                                    (WordBox word) ->
+                                            word.y
+                            )
+                            .thenComparingDouble(
+                                    word ->
+                                            word.x0
+                            )
+            );
+
+            StringBuilder room =
+                    new StringBuilder();
+
+            for (WordBox word : words) {
+                if (room.length() > 0) {
+                    room.append(' ');
+                }
+                room.append(word.text);
+            }
+
+            rooms.put(
+                    entry.getKey(),
+                    room.toString()
+                            .replaceAll(
+                                    "\\s+",
+                                    " "
+                            )
+                            .trim()
+            );
+        }
+
+        List<EventDraft> result =
+                new ArrayList<>();
+
+        for (Map.Entry<String, Block> entry :
+                blocks.entrySet()) {
+            CellRange range =
+                    ranges.get(entry.getKey());
+
+            if (range == null) continue;
+
+            String room =
+                    rooms.getOrDefault(
+                            range.endGroup,
+                            ""
+                    );
+
+            result.add(
+                    new EventDraft(
+                            entry.getValue(),
+                            range.startGroup,
+                            range.endGroup,
+                            room
+                    )
+            );
+        }
+
+        result.sort(
+                Comparator.comparingInt(
+                        draft ->
+                                draft.startGroup
+                )
+        );
+
+        return result;
+    }
+
+    private CellRange cellForPosition(
+            int pageIndex,
+            float globalY,
+            float x,
+            Header header,
+            List<PageData> pages
+    ) {
+        List<Float> boundaries =
+                boundariesAt(
+                        pageIndex,
+                        globalY,
+                        header,
+                        pages
+                );
+
+        int interval =
+                intervalAt(
+                        boundaries,
+                        x
+                );
+
+        if (interval < 0) return null;
+
+        CellRange direct =
+                groupsInside(
+                        boundaries.get(interval),
+                        boundaries.get(interval + 1),
+                        header
+                );
+
+        if (direct != null) {
+            return direct;
+        }
+
+        CellRange left =
+                interval > 0
+                        ? groupsInside(
+                        boundaries.get(interval - 1),
+                        boundaries.get(interval),
+                        header
+                )
+                        : null;
+
+        CellRange right =
+                interval + 2 <
+                        boundaries.size()
+                        ? groupsInside(
+                        boundaries.get(interval + 1),
+                        boundaries.get(interval + 2),
+                        header
+                )
+                        : null;
+
+        if (left == null) return right;
+        if (right == null) return left;
+
+        return Math.abs(
+                x - left.center()
+        ) <=
+                Math.abs(
+                        x - right.center()
+                )
+                ? left
+                : right;
+    }
+
+    private List<EventDraft> parseRowHeuristic(List<WordBox> rowWords, Header header, List<PageData> pages) {
         float roomTolerance = header.medianSpacing * 0.18f;
         float horizontalGap = header.medianSpacing * 0.205f;
         float blockMerge = header.medianSpacing * 0.165f;
