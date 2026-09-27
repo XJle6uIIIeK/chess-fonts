@@ -89,7 +89,9 @@ public final class NotificationScheduler {
                 .getString(KEY_GROUP, "")
                 .trim();
 
-        if (group.isEmpty() || !ScheduleStore.hasData(context)) {
+        if (group.isEmpty() ||
+                !ScheduleStore.hasData(context) ||
+                !ScheduleStore.isActiveParserCurrent(context)) {
             return;
         }
 
