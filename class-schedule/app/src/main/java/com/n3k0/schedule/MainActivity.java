@@ -358,6 +358,21 @@ public final class MainActivity extends Activity {
         scheduleContainer.addView(currentStatusCard);
         addGap(scheduleContainer, 12);
 
+        if (state.hasActiveSchedule &&
+                !ScheduleStore.isActiveParserCurrent(this)) {
+            currentStatusCard.setText(
+                    "Расписание было импортировано старой версией парсера и скрыто, " +
+                            "чтобы не показывать перепутанные дни.\n\n" +
+                            "Открой «Настройки» и импортируй исходный PDF заново."
+            );
+            currentStatusCard.setTextColor(WARN);
+            currentStatusCard.setOnClickListener(v ->
+                    switchScreen(AppState.Screen.SETTINGS)
+            );
+            scheduleGroupLabel.setText("");
+            return;
+        }
+
         if (!state.hasActiveSchedule || group.isEmpty()) {
             if (state.hasPendingSchedule) {
                 String pendingGroup =
@@ -913,8 +928,13 @@ public final class MainActivity extends Activity {
                 ScheduleStore.loadEvents(this);
 
         String period = "Не загружен";
+        boolean staleParser =
+                !activeEvents.isEmpty() &&
+                        !ScheduleStore.isActiveParserCurrent(this);
 
-        if (!activeEvents.isEmpty()) {
+        if (staleParser) {
+            period = "Нужно импортировать заново";
+        } else if (!activeEvents.isEmpty()) {
             LocalDate start =
                     NotificationScheduler
                             .scheduleStartDate(activeEvents);
@@ -955,12 +975,29 @@ public final class MainActivity extends Activity {
                         ? "Не выбрана"
                         : activeGroup) + "  ›"
         );
-        groupRow.setOnClickListener(v ->
-                showActiveGroupPicker()
-        );
+        groupRow.setEnabled(!staleParser);
+        groupRow.setAlpha(staleParser ? 0.45f : 1f);
+        groupRow.setOnClickListener(v -> {
+            if (!staleParser) {
+                showActiveGroupPicker();
+            }
+        });
         section.addView(groupRow);
 
         addDivider(section);
+
+        if (staleParser) {
+            TextView parserNote = text(
+                    "Парсер таблицы полностью переработан. Старые распознанные данные " +
+                            "не используются и не создают уведомления. Импортируй тот же PDF ещё раз.",
+                    13,
+                    WARN,
+                    false
+            );
+            parserNote.setPadding(0, dp(10), 0, dp(10));
+            section.addView(parserNote);
+            addDivider(section);
+        }
 
         TextView importRow = settingRow(
                 importing
@@ -1006,7 +1043,17 @@ public final class MainActivity extends Activity {
         LinearLayout section =
                 settingsSection("УВЕДОМЛЕНИЯ");
 
-        if (!state.hasActiveSchedule) {
+        if (state.hasActiveSchedule &&
+                !ScheduleStore.isActiveParserCurrent(this)) {
+            TextView note = text(
+                    "Уведомления временно не планируются: расписание нужно заново импортировать новым парсером.",
+                    13,
+                    WARN,
+                    false
+            );
+            note.setPadding(0, 0, 0, dp(8));
+            section.addView(note);
+        } else if (!state.hasActiveSchedule) {
             TextView note = text(
                     "Настройки сохранятся и начнут работать после активации расписания.",
                     13,
