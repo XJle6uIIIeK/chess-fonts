@@ -34,11 +34,11 @@ jobs:
         working-directory: class-schedule
         run: gradle --no-daemon :app:testDebugUnitTest
 
-      - name: Build debug APK
+      - name: Build release APK
         working-directory: class-schedule
-        run: gradle --no-daemon :app:assembleDebug
+        run: gradle --no-daemon :app:assembleRelease
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ClassSchedule-v0.5.2-debug
-          path: class-schedule/app/build/outputs/apk/debug/app-debug.apk
+          name: ClassSchedule-v0.5.2-release-unsigned
+          path: class-schedule/app/build/outputs/apk/release/app-release-unsigned.apk
