@@ -2080,6 +2080,16 @@ public final class MainActivity extends Activity {
             return;
         }
 
+        if (ScheduleStore.hasData(this) &&
+                !ScheduleStore.isActiveParserCurrent(this)) {
+            Toast.makeText(
+                    this,
+                    "Старое распознавание скрыто. Импортируй PDF заново новым парсером.",
+                    Toast.LENGTH_LONG
+            ).show();
+            return;
+        }
+
         if (!ScheduleStore.hasData(this)) {
             Toast.makeText(
                     this,
@@ -2791,6 +2801,16 @@ public final class MainActivity extends Activity {
     // ---------------------------------------------------------------------
 
     private void showNotificationTestPicker() {
+        if (ScheduleStore.hasData(this) &&
+                !ScheduleStore.isActiveParserCurrent(this)) {
+            Toast.makeText(
+                    this,
+                    "Сначала заново импортируй PDF новым парсером.",
+                    Toast.LENGTH_LONG
+            ).show();
+            return;
+        }
+
         if (!ScheduleStore.hasData(this) ||
                 activeGroup().isEmpty()) {
             Toast.makeText(
