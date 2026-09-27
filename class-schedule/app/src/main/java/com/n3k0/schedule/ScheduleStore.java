@@ -11,6 +11,8 @@ import java.util.Comparator;
 import java.util.List;
 
 public final class ScheduleStore {
+    public static final int CURRENT_PARSER_REVISION = 2;
+
     private static final String PREF = "schedule_store";
 
     private static final String KEY_ACTIVE_EVENTS = "active_events";
@@ -20,6 +22,7 @@ public final class ScheduleStore {
     private static final String KEY_ACTIVE_VALIDATION = "active_validation";
     private static final String KEY_ACTIVE_PAGE_COUNT = "active_page_count";
     private static final String KEY_ACTIVE_IMPORTED_AT = "active_imported_at";
+    private static final String KEY_ACTIVE_PARSER_REVISION = "active_parser_revision";
 
     private static final String KEY_PENDING_EVENTS = "pending_events";
     private static final String KEY_PENDING_GROUPS = "pending_groups";
@@ -29,6 +32,7 @@ public final class ScheduleStore {
     private static final String KEY_PENDING_VALIDATION = "pending_validation";
     private static final String KEY_PENDING_IMPORTED_AT = "pending_imported_at";
     private static final String KEY_PENDING_SELECTED_GROUP = "pending_selected_group";
+    private static final String KEY_PENDING_PARSER_REVISION = "pending_parser_revision";
 
     private static final String KEY_LAST_ERROR = "last_import_error";
 
@@ -69,6 +73,7 @@ public final class ScheduleStore {
                 .putString(KEY_PENDING_VALIDATION, validationIssues.toString())
                 .putInt(KEY_PENDING_PAGE_COUNT, result.pageCount)
                 .putLong(KEY_PENDING_IMPORTED_AT, System.currentTimeMillis())
+                .putInt(KEY_PENDING_PARSER_REVISION, CURRENT_PARSER_REVISION)
                 .remove(KEY_PENDING_SELECTED_GROUP)
                 .remove(KEY_LAST_ERROR)
                 .apply();
@@ -76,6 +81,14 @@ public final class ScheduleStore {
 
     public static void reprocessPending(Context context) {
         if (!hasPending(context)) return;
+
+        // Events created by the old page-local parser cannot be repaired from
+        // stored JSON because the lost table geometry is no longer available.
+        // They must be re-imported from the original PDF.
+        if (!isPendingParserCurrent(context)) {
+            discardPending(context);
+            return;
+        }
 
         String selectedGroup =
                 loadPendingSelectedGroup(context).trim();
@@ -192,6 +205,10 @@ public final class ScheduleStore {
         String validation = prefs.getString(KEY_PENDING_VALIDATION, "[]");
         int pageCount = prefs.getInt(KEY_PENDING_PAGE_COUNT, 0);
         long importedAt = prefs.getLong(KEY_PENDING_IMPORTED_AT, System.currentTimeMillis());
+        int parserRevision = prefs.getInt(
+                KEY_PENDING_PARSER_REVISION,
+                CURRENT_PARSER_REVISION
+        );
 
         SharedPreferences.Editor editor = prefs.edit()
                 .putString(KEY_ACTIVE_EVENTS, events)
@@ -200,7 +217,8 @@ public final class ScheduleStore {
                 .putString(KEY_ACTIVE_DIAGNOSTICS, diagnostics)
                 .putString(KEY_ACTIVE_VALIDATION, validation)
                 .putInt(KEY_ACTIVE_PAGE_COUNT, pageCount)
-                .putLong(KEY_ACTIVE_IMPORTED_AT, importedAt);
+                .putLong(KEY_ACTIVE_IMPORTED_AT, importedAt)
+                .putInt(KEY_ACTIVE_PARSER_REVISION, parserRevision);
 
         clearPending(editor);
         editor.apply();
@@ -221,6 +239,7 @@ public final class ScheduleStore {
         editor.remove(KEY_PENDING_PAGE_COUNT);
         editor.remove(KEY_PENDING_IMPORTED_AT);
         editor.remove(KEY_PENDING_SELECTED_GROUP);
+        editor.remove(KEY_PENDING_PARSER_REVISION);
     }
 
     public static List<ScheduleEvent> loadEvents(Context context) {
@@ -304,6 +323,22 @@ public final class ScheduleStore {
 
         out.sort(Comparator.comparing(event -> event.start));
         return out;
+    }
+
+    public static boolean isActiveParserCurrent(Context context) {
+        if (!hasData(context)) return true;
+        return prefs(context).getInt(
+                KEY_ACTIVE_PARSER_REVISION,
+                0
+        ) >= CURRENT_PARSER_REVISION;
+    }
+
+    public static boolean isPendingParserCurrent(Context context) {
+        if (!hasPending(context)) return true;
+        return prefs(context).getInt(
+                KEY_PENDING_PARSER_REVISION,
+                0
+        ) >= CURRENT_PARSER_REVISION;
     }
 
     public static boolean hasData(Context context) {
