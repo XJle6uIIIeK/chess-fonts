@@ -113,6 +113,6 @@ public final class ScheduleCalendarResolverTest {
         explicit.add(LocalDate.of(2026, 9, 30));
 
         new ScheduleCalendarResolver()
-                .resolve(explicit, 10);
+                .resolve(explicit, 29);
     }
 }
