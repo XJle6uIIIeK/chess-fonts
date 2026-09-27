@@ -13,6 +13,7 @@ import com.tom_roush.pdfbox.text.TextPosition;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.time.DayOfWeek;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
@@ -418,6 +419,17 @@ public final class ScheduleParser {
             return pair == r.pair && date.equals(r.date);
         }
         @Override public int hashCode() { return date.hashCode() * 31 + pair; }
+    }
+
+    private static final class PairSlice {
+        final int pair;
+        final int pageIndex;
+        final List<WordBox> words = new ArrayList<>();
+
+        PairSlice(int pair, int pageIndex) {
+            this.pair = pair;
+            this.pageIndex = pageIndex;
+        }
     }
 
     public ParseResult parse(InputStream input) throws IOException {
@@ -921,119 +933,20 @@ public final class ScheduleParser {
             List<PageData> pages,
             Header header,
             List<String> warnings
-    ) {
-        Map<RowKey, List<WordBox>> rows =
-                new LinkedHashMap<>();
+    ) throws IOException {
+        List<PairSlice> pairSlices =
+                new ArrayList<>();
 
-        LocalDate carryDate = null;
-        int carryPair = -1;
-
+        // Phase 1: reconstruct physical pair rows globally across every PDF
+        // page. Page breaks are a rendering detail and are deliberately removed
+        // before dates are assigned.
         for (PageData page : pages) {
             if (page.rows.isEmpty()) continue;
 
-            LocalDate carryBeforePage = carryDate;
-            int carryPairBeforePage = carryPair;
+            PairRow firstRow =
+                    page.rows.get(0);
 
-            List<LocalDate> explicitDates =
-                    extractDates(page.words);
-
-            List<List<Integer>> dayGroups =
-                    groupPairRowIndexes(page.rows);
-
-            Map<Integer, LocalDate> rowDates =
-                    new HashMap<>();
-
-            int dateIndex = 0;
-
-            for (int dayIndex = 0;
-                 dayIndex < dayGroups.size();
-                 dayIndex++) {
-                List<Integer> indexes =
-                        dayGroups.get(dayIndex);
-
-                int firstPair =
-                        page.rows.get(
-                                indexes.get(0)
-                        ).pair;
-
-                LocalDate assigned;
-
-                if (dayIndex == 0 &&
-                        firstPair != 1 &&
-                        carryDate != null) {
-                    assigned = carryDate;
-                } else if (dateIndex <
-                        explicitDates.size()) {
-                    assigned =
-                            explicitDates.get(dateIndex++);
-                } else {
-                    // Never fabricate a calendar day. The timetable skips
-                    // Sundays and may omit other dates, so carryDate.plusDays(1)
-                    // can silently move an entire block onto the wrong day.
-                    // Dropping an unlabelled block is safer and is surfaced in
-                    // diagnostics instead of contaminating a valid date.
-                    warnings.add(
-                            "Стр. " +
-                                    (page.pageIndex + 1) +
-                                    ": не удалось привязать блок пар, начиная с " +
-                                    firstPair +
-                                    "-й пары, к явной дате. Блок пропущен."
-                    );
-                    continue;
-                }
-
-                for (int index : indexes) {
-                    rowDates.put(index, assigned);
-                }
-
-                carryDate = assigned;
-            }
-
-            for (int i = 0;
-                 i < page.rows.size();
-                 i++) {
-                PairRow row = page.rows.get(i);
-                LocalDate date = rowDates.get(i);
-
-                if (date == null) continue;
-
-                RowKey key =
-                        new RowKey(date, row.pair);
-
-                List<WordBox> destination =
-                        rows.computeIfAbsent(
-                                key,
-                                ignored -> new ArrayList<>()
-                        );
-
-                // Exact grid boundaries are intentionally inclusive only on
-                // the top edge and exclusive on the bottom edge. A subject
-                // beginning in the next day's first pair therefore cannot
-                // leak upward into pair 5 of the previous day.
-                for (WordBox word : page.words) {
-                    if (word.x0 <
-                            header.groupAreaLeft - 1.0f) {
-                        continue;
-                    }
-
-                    if (word.y >= row.top - 0.4f &&
-                            word.y < row.bottom - 0.4f) {
-                        destination.add(word.globalY());
-                    }
-                }
-
-                carryDate = date;
-                carryPair = row.pair;
-            }
-
-            // A PDF page may start in the middle of a pair. In that case there
-            // is text above the first complete pair-row rectangle, but no pair
-            // number on this page. Append that fragment to the exact row that
-            // ended the previous page. Never infer "firstPair - 1": the stored
-            // previous row is authoritative and also works for a split pair 5.
-            if (carryBeforePage != null &&
-                    carryPairBeforePage >= 1) {
-                PairRow first = page.rows.get(0);
+            if (!pairSlices.isEmpty()) {
                 List<WordBox> continuation =
                         new ArrayList<>();
 
@@ -1044,7 +957,7 @@ public final class ScheduleParser {
                     }
 
                     if (word.y <
-                            first.top - 0.4f) {
+                            firstRow.top - 0.4f) {
                         continuation.add(
                                 word.globalY()
                         );
@@ -1052,23 +965,296 @@ public final class ScheduleParser {
                 }
 
                 if (!continuation.isEmpty()) {
-                    RowKey previous =
-                            new RowKey(
-                                    carryBeforePage,
-                                    carryPairBeforePage
+                    PairSlice previous =
+                            pairSlices.get(
+                                    pairSlices.size() - 1
                             );
 
-                    rows.computeIfAbsent(
-                                    previous,
-                                    ignored ->
-                                            new ArrayList<>()
-                            )
-                            .addAll(continuation);
+                    // Do not absorb a repeated table header into a lesson.
+                    boolean containsGroupHeader = false;
+                    for (WordBox word : continuation) {
+                        if (looksLikeGroup(
+                                normalizeGroupCandidate(
+                                        word.text
+                                )
+                        )) {
+                            containsGroupHeader = true;
+                            break;
+                        }
+                    }
+
+                    if (!containsGroupHeader) {
+                        previous.words.addAll(
+                                continuation
+                        );
+                    }
                 }
+            }
+
+            for (PairRow row : page.rows) {
+                PairSlice slice =
+                        new PairSlice(
+                                row.pair,
+                                page.pageIndex
+                        );
+
+                for (WordBox word : page.words) {
+                    if (word.x0 <
+                            header.groupAreaLeft - 1.0f) {
+                        continue;
+                    }
+
+                    if (word.y >= row.top - 0.4f &&
+                            word.y < row.bottom - 0.4f) {
+                        slice.words.add(
+                                word.globalY()
+                        );
+                    }
+                }
+
+                pairSlices.add(slice);
+            }
+        }
+
+        if (pairSlices.isEmpty()) {
+            throw new IOException(
+                    "Не удалось восстановить строки пар по сетке таблицы"
+            );
+        }
+
+        // Phase 2: pair-number resets define day blocks globally. This works
+        // even when the date label or half of a lesson is split between pages.
+        List<List<PairSlice>> dayBlocks =
+                new ArrayList<>();
+
+        List<PairSlice> current =
+                new ArrayList<>();
+
+        Integer previousPair = null;
+
+        for (PairSlice slice : pairSlices) {
+            if (previousPair != null &&
+                    slice.pair <= previousPair) {
+                if (!current.isEmpty()) {
+                    dayBlocks.add(current);
+                }
+                current =
+                        new ArrayList<>();
+            }
+
+            current.add(slice);
+            previousPair = slice.pair;
+        }
+
+        if (!current.isEmpty()) {
+            dayBlocks.add(current);
+        }
+
+        // Phase 3: resolve the calendar only after the physical table is known.
+        // Rotated date labels may disappear at page breaks (03.09, 11.09 and
+        // 22.09 in the supplied PDF), therefore page-local date assignment is
+        // fundamentally unsafe.
+        LinkedHashSet<LocalDate> explicitSet =
+                new LinkedHashSet<>();
+
+        for (PageData page : pages) {
+            explicitSet.addAll(
+                    extractDates(page.words)
+            );
+        }
+
+        List<LocalDate> explicitDates =
+                new ArrayList<>(explicitSet);
+        Collections.sort(explicitDates);
+
+        List<LocalDate> resolvedDates =
+                resolveDayBlockDates(
+                        explicitDates,
+                        dayBlocks.size(),
+                        warnings
+                );
+
+        if (resolvedDates.size() !=
+                dayBlocks.size()) {
+            throw new IOException(
+                    "Количество дней таблицы (" +
+                            dayBlocks.size() +
+                            ") не совпало с восстановленным календарём (" +
+                            resolvedDates.size() +
+                            ")"
+            );
+        }
+
+        Map<RowKey, List<WordBox>> rows =
+                new LinkedHashMap<>();
+
+        for (int dayIndex = 0;
+             dayIndex < dayBlocks.size();
+             dayIndex++) {
+            LocalDate date =
+                    resolvedDates.get(dayIndex);
+
+            List<PairSlice> block =
+                    dayBlocks.get(dayIndex);
+
+            Set<Integer> seenPairs =
+                    new LinkedHashSet<>();
+
+            for (PairSlice slice : block) {
+                if (!seenPairs.add(slice.pair)) {
+                    warnings.add(
+                            "Дата " +
+                                    SHORT_DATE.format(date) +
+                                    ": номер пары " +
+                                    slice.pair +
+                                    " встретился повторно."
+                    );
+                }
+
+                RowKey key =
+                        new RowKey(
+                                date,
+                                slice.pair
+                        );
+
+                rows.computeIfAbsent(
+                                key,
+                                ignored ->
+                                        new ArrayList<>()
+                        )
+                        .addAll(slice.words);
             }
         }
 
         return rows;
+    }
+
+    private List<LocalDate> resolveDayBlockDates(
+            List<LocalDate> explicitDates,
+            int dayBlockCount,
+            List<String> warnings
+    ) throws IOException {
+        if (explicitDates.isEmpty()) {
+            throw new IOException(
+                    "В таблице не удалось найти ни одной явной даты"
+            );
+        }
+
+        if (explicitDates.size() ==
+                dayBlockCount) {
+            return new ArrayList<>(
+                    explicitDates
+            );
+        }
+
+        LocalDate start =
+                explicitDates.get(0);
+        LocalDate end =
+                explicitDates.get(
+                        explicitDates.size() - 1
+                );
+
+        Set<DayOfWeek> explicitWeekdays =
+                new LinkedHashSet<>();
+
+        for (LocalDate date : explicitDates) {
+            explicitWeekdays.add(
+                    date.getDayOfWeek()
+            );
+        }
+
+        List<DayOfWeek> absentWeekdays =
+                new ArrayList<>();
+
+        for (DayOfWeek day :
+                DayOfWeek.values()) {
+            if (!explicitWeekdays.contains(day)) {
+                absentWeekdays.add(day);
+            }
+        }
+
+        List<List<LocalDate>> candidates =
+                new ArrayList<>();
+
+        int subsetCount =
+                1 << absentWeekdays.size();
+
+        for (int mask = 0;
+             mask < subsetCount;
+             mask++) {
+            Set<DayOfWeek> excluded =
+                    new LinkedHashSet<>();
+
+            for (int i = 0;
+                 i < absentWeekdays.size();
+                 i++) {
+                if ((mask & (1 << i)) != 0) {
+                    excluded.add(
+                            absentWeekdays.get(i)
+                    );
+                }
+            }
+
+            List<LocalDate> candidate =
+                    new ArrayList<>();
+
+            LocalDate cursor = start;
+
+            while (!cursor.isAfter(end)) {
+                if (!excluded.contains(
+                        cursor.getDayOfWeek()
+                )) {
+                    candidate.add(cursor);
+                }
+
+                cursor =
+                        cursor.plusDays(1);
+            }
+
+            if (candidate.size() !=
+                    dayBlockCount) {
+                continue;
+            }
+
+            if (!candidate.containsAll(
+                    explicitDates
+            )) {
+                continue;
+            }
+
+            candidates.add(candidate);
+        }
+
+        if (candidates.size() != 1) {
+            throw new IOException(
+                    "Не удалось однозначно сопоставить " +
+                            dayBlockCount +
+                            " блоков дней с явными датами " +
+                            SHORT_DATE.format(start) +
+                            "–" +
+                            SHORT_DATE.format(end) +
+                            ". Найдено вариантов: " +
+                            candidates.size()
+            );
+        }
+
+        List<LocalDate> resolved =
+                candidates.get(0);
+
+        Set<LocalDate> explicit =
+                new HashSet<>(explicitDates);
+
+        for (LocalDate date : resolved) {
+            if (!explicit.contains(date)) {
+                warnings.add(
+                        "Дата " +
+                                SHORT_DATE.format(date) +
+                                " восстановлена по глобальной последовательности строк таблицы."
+                );
+            }
+        }
+
+        return resolved;
     }
 
     private List<LocalDate> extractDates(List<WordBox> words) {
