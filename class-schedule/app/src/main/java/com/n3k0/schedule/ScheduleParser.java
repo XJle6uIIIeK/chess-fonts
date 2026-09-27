@@ -966,17 +966,19 @@ public final class ScheduleParser {
                         explicitDates.size()) {
                     assigned =
                             explicitDates.get(dateIndex++);
-                } else if (carryDate != null) {
-                    assigned =
-                            carryDate.plusDays(1);
-
+                } else {
+                    // Never fabricate a calendar day. The timetable skips
+                    // Sundays and may omit other dates, so carryDate.plusDays(1)
+                    // can silently move an entire block onto the wrong day.
+                    // Dropping an unlabelled block is safer and is surfaced in
+                    // diagnostics instead of contaminating a valid date.
                     warnings.add(
                             "Стр. " +
                                     (page.pageIndex + 1) +
-                                    ": дата восстановлена как " +
-                                    SHORT_DATE.format(assigned)
+                                    ": не удалось привязать блок пар, начиная с " +
+                                    firstPair +
+                                    "-й пары, к явной дате. Блок пропущен."
                     );
-                } else {
                     continue;
                 }
 
