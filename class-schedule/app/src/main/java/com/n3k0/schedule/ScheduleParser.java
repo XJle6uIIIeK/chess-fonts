@@ -1049,6 +1049,48 @@ public final class ScheduleParser {
             dayBlocks.add(current);
         }
 
+        // This timetable always draws all five pair rows, including empty ones.
+        // Enforce that invariant before any calendar dates are attached. If a
+        // grid line or pair number could not be recovered, failing the import is
+        // safer than shifting later lessons into a neighbouring day.
+        for (int dayIndex = 0;
+             dayIndex < dayBlocks.size();
+             dayIndex++) {
+            List<PairSlice> block =
+                    dayBlocks.get(dayIndex);
+
+            if (block.size() != 5) {
+                throw new IOException(
+                        "Повреждена сетка дня №" +
+                                (dayIndex + 1) +
+                                ": найдено строк пар " +
+                                block.size() +
+                                " вместо 5"
+                );
+            }
+
+            for (int pairIndex = 0;
+                 pairIndex < 5;
+                 pairIndex++) {
+                int expectedPair =
+                        pairIndex + 1;
+                int actualPair =
+                        block.get(pairIndex).pair;
+
+                if (actualPair != expectedPair) {
+                    throw new IOException(
+                            "Повреждена последовательность пар дня №" +
+                                    (dayIndex + 1) +
+                                    ": ожидалась " +
+                                    expectedPair +
+                                    "-я пара, найдена " +
+                                    actualPair +
+                                    "-я"
+                    );
+                }
+            }
+        }
+
         // Phase 3: resolve the calendar only after the physical table is known.
         // Rotated date labels may disappear at page breaks (03.09, 11.09 and
         // 22.09 in the supplied PDF), therefore page-local date assignment is
