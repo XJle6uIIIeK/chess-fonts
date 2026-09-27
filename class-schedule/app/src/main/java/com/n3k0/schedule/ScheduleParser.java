@@ -13,7 +13,6 @@ import com.tom_roush.pdfbox.text.TextPosition;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.time.DayOfWeek;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
@@ -1067,12 +1066,34 @@ public final class ScheduleParser {
                 new ArrayList<>(explicitSet);
         Collections.sort(explicitDates);
 
-        List<LocalDate> resolvedDates =
-                resolveDayBlockDates(
-                        explicitDates,
-                        dayBlocks.size(),
-                        warnings
+        List<LocalDate> resolvedDates;
+
+        try {
+            resolvedDates =
+                    new ScheduleCalendarResolver()
+                            .resolve(
+                                    explicitDates,
+                                    dayBlocks.size()
+                            );
+        } catch (IllegalArgumentException error) {
+            throw new IOException(
+                    error.getMessage(),
+                    error
+            );
+        }
+
+        Set<LocalDate> explicitDateSet =
+                new HashSet<>(explicitDates);
+
+        for (LocalDate date : resolvedDates) {
+            if (!explicitDateSet.contains(date)) {
+                warnings.add(
+                        "Дата " +
+                                SHORT_DATE.format(date) +
+                                " восстановлена по глобальной последовательности строк таблицы."
                 );
+            }
+        }
 
         if (resolvedDates.size() !=
                 dayBlocks.size()) {
@@ -1127,134 +1148,6 @@ public final class ScheduleParser {
         }
 
         return rows;
-    }
-
-    private List<LocalDate> resolveDayBlockDates(
-            List<LocalDate> explicitDates,
-            int dayBlockCount,
-            List<String> warnings
-    ) throws IOException {
-        if (explicitDates.isEmpty()) {
-            throw new IOException(
-                    "В таблице не удалось найти ни одной явной даты"
-            );
-        }
-
-        if (explicitDates.size() ==
-                dayBlockCount) {
-            return new ArrayList<>(
-                    explicitDates
-            );
-        }
-
-        LocalDate start =
-                explicitDates.get(0);
-        LocalDate end =
-                explicitDates.get(
-                        explicitDates.size() - 1
-                );
-
-        Set<DayOfWeek> explicitWeekdays =
-                new LinkedHashSet<>();
-
-        for (LocalDate date : explicitDates) {
-            explicitWeekdays.add(
-                    date.getDayOfWeek()
-            );
-        }
-
-        List<DayOfWeek> absentWeekdays =
-                new ArrayList<>();
-
-        for (DayOfWeek day :
-                DayOfWeek.values()) {
-            if (!explicitWeekdays.contains(day)) {
-                absentWeekdays.add(day);
-            }
-        }
-
-        List<List<LocalDate>> candidates =
-                new ArrayList<>();
-
-        int subsetCount =
-                1 << absentWeekdays.size();
-
-        for (int mask = 0;
-             mask < subsetCount;
-             mask++) {
-            Set<DayOfWeek> excluded =
-                    new LinkedHashSet<>();
-
-            for (int i = 0;
-                 i < absentWeekdays.size();
-                 i++) {
-                if ((mask & (1 << i)) != 0) {
-                    excluded.add(
-                            absentWeekdays.get(i)
-                    );
-                }
-            }
-
-            List<LocalDate> candidate =
-                    new ArrayList<>();
-
-            LocalDate cursor = start;
-
-            while (!cursor.isAfter(end)) {
-                if (!excluded.contains(
-                        cursor.getDayOfWeek()
-                )) {
-                    candidate.add(cursor);
-                }
-
-                cursor =
-                        cursor.plusDays(1);
-            }
-
-            if (candidate.size() !=
-                    dayBlockCount) {
-                continue;
-            }
-
-            if (!candidate.containsAll(
-                    explicitDates
-            )) {
-                continue;
-            }
-
-            candidates.add(candidate);
-        }
-
-        if (candidates.size() != 1) {
-            throw new IOException(
-                    "Не удалось однозначно сопоставить " +
-                            dayBlockCount +
-                            " блоков дней с явными датами " +
-                            SHORT_DATE.format(start) +
-                            "–" +
-                            SHORT_DATE.format(end) +
-                            ". Найдено вариантов: " +
-                            candidates.size()
-            );
-        }
-
-        List<LocalDate> resolved =
-                candidates.get(0);
-
-        Set<LocalDate> explicit =
-                new HashSet<>(explicitDates);
-
-        for (LocalDate date : resolved) {
-            if (!explicit.contains(date)) {
-                warnings.add(
-                        "Дата " +
-                                SHORT_DATE.format(date) +
-                                " восстановлена по глобальной последовательности строк таблицы."
-                );
-            }
-        }
-
-        return resolved;
     }
 
     private List<LocalDate> extractDates(List<WordBox> words) {
