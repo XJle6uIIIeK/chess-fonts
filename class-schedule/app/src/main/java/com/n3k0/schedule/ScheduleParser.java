@@ -1162,10 +1162,9 @@ public final class ScheduleParser {
         // order reliably; on page 7 it can expose 25.09 before 23.09, which
         // shifts the entire day's timetable by two days.
         //
-        // This is a monthly chronological timetable, so the only stable source
-        // of ordering is the date value itself. Sort dates chronologically,
-        // then map them to consecutive day blocks. Continuations at page starts
-        // are still handled separately via carryDate.
+        // The parser no longer assigns these dates page-by-page. They are
+        // collected globally and reconciled with the complete physical sequence
+        // of day blocks after page-break continuations have been joined.
         List<LocalDate> out = new ArrayList<>(unique);
         Collections.sort(out);
         return out;
@@ -1188,39 +1187,6 @@ public final class ScheduleParser {
             }
         }
         return null;
-    }
-
-    private List<List<Integer>> groupPairRowIndexes(
-            List<PairRow> rows
-    ) {
-        List<List<Integer>> result =
-                new ArrayList<>();
-
-        List<Integer> current =
-                new ArrayList<>();
-
-        Integer previousPair = null;
-
-        for (int i = 0; i < rows.size(); i++) {
-            int pair = rows.get(i).pair;
-
-            if (previousPair != null &&
-                    pair <= previousPair) {
-                if (!current.isEmpty()) {
-                    result.add(current);
-                }
-                current = new ArrayList<>();
-            }
-
-            current.add(i);
-            previousPair = pair;
-        }
-
-        if (!current.isEmpty()) {
-            result.add(current);
-        }
-
-        return result;
     }
 
     private List<EventDraft> parseRow(
