@@ -42,3 +42,18 @@ jobs:
         with:
           name: ClassSchedule-v0.6.0-release-unsigned
           path: class-schedule/app/build/outputs/apk/release/app-release-unsigned.apk
+
+      - name: Prepare source archive
+        shell: bash
+        run: |
+          rm -rf /tmp/ClassSchedule-v0.6.0-source
+          mkdir -p /tmp/ClassSchedule-v0.6.0-source
+          rsync -a \
+            --exclude '.gradle/' \
+            --exclude '**/build/' \
+            class-schedule/ /tmp/ClassSchedule-v0.6.0-source/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ClassSchedule-v0.6.0-source
+          path: /tmp/ClassSchedule-v0.6.0-source/
